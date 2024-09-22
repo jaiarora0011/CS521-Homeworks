@@ -1,1 +1,3 @@
 mnist_data/
+adversarial_examples/
+*.pdf
