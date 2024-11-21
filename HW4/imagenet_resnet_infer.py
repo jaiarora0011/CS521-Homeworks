@@ -4,6 +4,9 @@ import torchvision.models as models
 from PIL import Image
 import json
 import os
+from skimage.segmentation import slic, mark_boundaries, felzenszwalb, quickshift
+import matplotlib.pyplot as plt
+import numpy as np
 
 # Load the pre-trained ResNet18 model
 model = models.resnet18(pretrained=True)
@@ -32,12 +35,35 @@ imagenet_path = './imagenet_samples'
 # List of image file paths
 image_paths = os.listdir(imagenet_path)
 
+def gen_superpixels(input_image, img_name, method='slic'):
+    numpy_image = np.array(input_image)
+    
+    def plot_superpixels(superpixels, img_name, method):
+        plt.imshow(superpixels)
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(f'superpixels/{method}_{img_name}', bbox_inches='tight', pad_inches=0)
+        plt.clf()
+
+    segments = None
+    if method == 'slic':
+        segments = slic(numpy_image, n_segments=100, compactness=10, start_label=1)
+    elif method == 'felzenszwalb':
+        segments = felzenszwalb(numpy_image, scale=100, sigma=0.5, min_size=50)
+    elif method == 'quickshift':
+        segments = quickshift(numpy_image, kernel_size=3, max_dist=6, ratio=0.5)
+    else:
+        assert False, 'Unssupported segmentation method'
+
+    superpixels = mark_boundaries(numpy_image, segments)
+    plot_superpixels(superpixels, img_name, method)
 
 for img_path in image_paths:
     # Open and preprocess the image
     # my_img = os.path.join(img_path, os.listdir(img_path)[2])
     my_img = os.path.join(imagenet_path, img_path)
     input_image = Image.open(my_img).convert('RGB')
+    gen_superpixels(input_image, img_path)
     input_tensor = preprocess(input_image)
     input_batch = input_tensor.unsqueeze(0)  # Create a mini-batch as expected by the model
 
