@@ -7,7 +7,7 @@ import os
 from skimage.segmentation import slic, mark_boundaries, felzenszwalb, quickshift
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.linear_model import lasso_path
+from sklearn.linear_model import Lasso, Ridge
 
 # Load the pre-trained ResNet18 model
 model = models.resnet18(pretrained=True)
@@ -48,7 +48,7 @@ def gen_superpixels(input_image, img_name, method='slic'):
 
     segments = None
     if method == 'slic':
-        segments = slic(numpy_image, n_segments=100, compactness=10, start_label=1)
+        segments = slic(numpy_image, n_segments=100, compactness=10, start_label=0)
     elif method == 'felzenszwalb':
         segments = felzenszwalb(numpy_image, scale=100, sigma=0.5, min_size=50)
     elif method == 'quickshift':
@@ -63,19 +63,19 @@ def gen_superpixels(input_image, img_name, method='slic'):
 
 def perturb_superpixels(segments, num_samples):
     # Perturb the superpixels uniformly at random
-    # Generate a list of binary vectors with one bit for each segment
+    # Generate a numpy array of shape (num_smaples, num_segments)
+    # Each row is a binary vectors with one bit for each segment
     # 1 indicates that the segment is unchanged, 0 indicates that the segment is zeroed out
-    binary_perturbations = []
     num_segments = len(np.unique(segments))
-    for _ in range(num_samples):
-        binary_perturbation = np.random.randint(0, 2, size=num_segments)
-        binary_perturbations.append(binary_perturbation)
-    return binary_perturbations
+    perturbations = np.random.randint(0, 2, size=(num_samples, num_segments))
+    return perturbations
 
-def get_image_from_perturbation(input_image, segments, perturbation):
+def get_image_from_perturbation(input_image, segments, perturbation=None, active_segments=None):
     # Create a perturbed image by zeroing out the superpixels indicated by the perturbation
-
-    active_segments = np.where(perturbation == 1)[0] + 1 # segments are 1-indexed
+    if perturbation is None and active_segments is None:
+        return input_image
+    if active_segments is None:
+        active_segments = np.where(perturbation == 1)[0]
     perturbed_image = input_image.copy()
     mask = np.isin(segments, active_segments)
     # Extend the mask to 3D and apply
@@ -106,16 +106,31 @@ def get_model_prediction(model, input_image):
     return predicted_idx, predicted_synset, predicted_label
 
 def get_weight(original_image, perturbed_image, width):
-    distance = np.linalg.norm(original_image - perturbed_image)
-    return np.exp(- distance ** 2 / width ** 2)
+    # First normalize the images
+    o = preprocess(Image.fromarray(original_image))
+    p = preprocess(Image.fromarray(perturbed_image))
+    distance = np.linalg.norm(o - p)
+    return np.exp(- (distance ** 2) / width ** 2)
 
-def train_sparse_linear_model(original_image, perturbed_dataset, width):
-    # compute weights
+def train_sparse_linear_model(original_image, perturbed_dataset, width, K):
+    # Compute weights
     weights = []
     for _, perturbed_image, _ in perturbed_dataset:
         weights.append(get_weight(original_image, perturbed_image, width))
+    weights = np.array(weights)
 
-def lime(num_samples=50):
+    inputs = np.stack([x[0] for x in perturbed_dataset])
+    outputs = np.array([x[2] for x in perturbed_dataset])
+
+    ridge = Ridge(alpha=0.1, max_iter=10000)
+    ridge.fit(inputs, outputs, sample_weight=weights)
+    model_weights = ridge.coef_
+    top_k_weights = np.argsort(model_weights)[-K:]
+
+    return top_k_weights
+
+# Increased the width to deal with large distances (~500)
+def lime(num_samples=1000, width=600, K=10, method='slic'):
     for img_path in image_paths:
         # Open and preprocess the image
         # my_img = os.path.join(img_path, os.listdir(img_path)[2])
@@ -125,16 +140,21 @@ def lime(num_samples=50):
         predicted_idx, predicted_synset, predicted_label = get_model_prediction(model, input_image)
         print(f'Predicted label for {img_path}: {predicted_idx} ({predicted_synset}, {predicted_label})')
 
-        numpy_image, segments = gen_superpixels(input_image, img_path)
+        numpy_image, segments = gen_superpixels(input_image, img_path, method)
         # a list of binary perturbation vectors (each vector has one bit for each segment)
 
-        binary_perturbations = perturb_superpixels(segments, num_samples)
+        perturbations = perturb_superpixels(segments, num_samples)
 
         # List of (perturbation vector, perturbed image, predicted class index) tuples
         perturbed_dataset = []
-        for perturbation in binary_perturbations:
+        for perturbation in perturbations:
             perturbed_image = get_image_from_perturbation(numpy_image, segments, perturbation)
             idx, _, _ = get_model_prediction(model, Image.fromarray(perturbed_image))
             perturbed_dataset.append((perturbation, perturbed_image, idx))
+
+        top_k_segments = train_sparse_linear_model(numpy_image, perturbed_dataset, width, K)
+        explanation = get_image_from_perturbation(numpy_image, segments, active_segments=top_k_segments)
+
+        plot_superpixels(explanation, f'lime_explanations/{img_path}')
 
 lime()
