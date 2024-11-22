@@ -37,11 +37,11 @@ imagenet_path = './imagenet_samples'
 image_paths = os.listdir(imagenet_path)
 
 def plot_superpixels(superpixels, img_path):
-        plt.imshow(superpixels)
-        plt.axis('off')
-        plt.tight_layout()
-        plt.savefig(img_path, bbox_inches='tight', pad_inches=0)
-        plt.clf()
+    plt.imshow(superpixels)
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(img_path, bbox_inches='tight', pad_inches=0)
+    plt.clf()
 
 def gen_superpixels(input_image, img_name, method='slic'):
     numpy_image = np.array(input_image)
@@ -157,4 +157,51 @@ def lime(num_samples=1000, width=600, K=10, method='slic'):
 
         plot_superpixels(explanation, f'lime_explanations/{img_path}')
 
-lime()
+def visualize_gradients(gradients, img_path, percentile=99):
+    gradients = gradients.squeeze().cpu().detach().numpy()
+    # sum across the RGB channels
+    gradients = np.sum(gradients, axis=0)
+    percentile_value = abs(np.percentile(gradients, percentile))
+    gradients = np.clip(gradients, -percentile_value, percentile_value)
+    gradients = (gradients - gradients.min()) / (gradients.max() - gradients.min())
+    plt.imshow(gradients)
+    plt.tight_layout()
+    plt.savefig(img_path, bbox_inches='tight')
+    plt.clf()
+
+def smoothgrad(num_samples, noise_std):
+    for img_path in image_paths:
+        # Open and preprocess the image
+        # my_img = os.path.join(img_path, os.listdir(img_path)[2])
+        my_img = os.path.join(imagenet_path, img_path)
+        input_image = Image.open(my_img).convert('RGB')
+
+        predicted_idx, predicted_synset, predicted_label = get_model_prediction(model, input_image)
+        print(f'Predicted label for {img_path}: {predicted_idx} ({predicted_synset}, {predicted_label})')
+
+        input_tensor = preprocess(input_image).unsqueeze(0)
+        input_tensor.requires_grad = True
+
+        grad_avg = torch.zeros_like(input_tensor)
+        for _ in range(num_samples):
+            noise = torch.randn_like(input_tensor) * noise_std
+            perturbed_input = input_tensor + noise
+            # TODO: dedup code
+            # Move the input and model to GPU if available
+            if torch.cuda.is_available():
+                perturbed_input = perturbed_input.to('cuda')
+                model.to('cuda')
+
+            output = model(perturbed_input)
+            _, predicted_idx = torch.max(output, 1)
+
+            model.zero_grad()
+            output[0, predicted_idx].backward()
+            grad_avg += input_tensor.grad
+
+        grad_avg /= num_samples
+        visualize_gradients(grad_avg, input_tensor, f'smoothgrad_explanations/{img_path}')
+
+if __name__ == '__main__':
+    lime()
+    smoothgrad(num_samples=50, noise_std=0.25)
